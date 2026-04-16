@@ -1234,18 +1234,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="DMARC Aggregate Report Collector & Summarizer",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-modes:
-  collect    Fetch new DMARC reports from IMAP and store in the database.
-  summarize  Send (or print) an HTML summary of reports since the last summary.
-  both       Run collect then summarize (default).
-
 examples:
-  dmarc_report.py                              # collect + summarize
-  dmarc_report.py --mode collect               # fetch only
-  dmarc_report.py --mode summarize --dry-run   # dump HTML to stdout
-  dmarc_report.py --mode summarize --preview   # open in browser
-  dmarc_report.py --mode summarize --since 2024-01-01
-  dmarc_report.py --config /etc/dmarc.toml -v
+  dmarc_report                              # collect + summarize (default)
+  dmarc_report --collect                    # fetch only
+  dmarc_report --summarize                  # summarize only
+  dmarc_report --summarize --dry-run        # dump HTML to stdout
+  dmarc_report --summarize --preview        # open in browser
+  dmarc_report --summarize --since 2024-01-01
+  dmarc_report --config /etc/dmarc_report/config.toml -v
 """,
     )
     p.add_argument(
@@ -1255,10 +1251,16 @@ examples:
         help="Path to TOML config file (default: ~/.config/dmarc_report/config.toml)",
     )
     p.add_argument(
-        "--mode",
-        choices=["collect", "summarize", "both"],
-        default="both",
-        help="Operation mode (default: both)",
+        "--collect",
+        action="store_true",
+        default=False,
+        help="Fetch new reports from IMAP (default: on unless --summarize is given alone)",
+    )
+    p.add_argument(
+        "--summarize",
+        action="store_true",
+        default=False,
+        help="Send summary email (default: on unless --collect is given alone)",
     )
     p.add_argument(
         "--since",
@@ -1316,11 +1318,14 @@ def main() -> None:
     conn = init_db(config.db_path)
 
     try:
-        if args.mode in ("collect", "both"):
+        do_collect = args.collect or not args.summarize
+        do_summarize = args.summarize or not args.collect
+
+        if do_collect:
             count = collect(config, conn)
             logger.info("Collection complete: %d new report(s) imported.", count)
 
-        if args.mode in ("summarize", "both"):
+        if do_summarize:
             since = args.since
             if since and re.match(r"^\d{4}-\d{2}-\d{2}$", since):
                 since = since + "T00:00:00+00:00"
