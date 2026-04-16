@@ -20,10 +20,13 @@ import gzip
 import imaplib
 import io
 import logging
+import os
 import re
 import smtplib
 import sqlite3
+import subprocess
 import sys
+import tempfile
 import time
 import zipfile
 from collections import defaultdict
@@ -357,6 +360,24 @@ def get_records_for_reports(
         f"SELECT * FROM report_records WHERE raw_report_id IN ({placeholders})",
         report_ids,
     ).fetchall()
+
+
+def get_headers_for_reports(
+    conn: sqlite3.Connection, report_ids: list[int]
+) -> dict[int, dict[str, str]]:
+    """Return {raw_report_id: {header_name: header_value}} for the given reports."""
+    if not report_ids:
+        return {}
+    placeholders = ",".join("?" * len(report_ids))
+    rows = conn.execute(
+        f"SELECT raw_report_id, header_name, header_value FROM email_headers "
+        f"WHERE raw_report_id IN ({placeholders})",
+        report_ids,
+    ).fetchall()
+    result: dict[int, dict[str, str]] = defaultdict(dict)
+    for row in rows:
+        result[row["raw_report_id"]][row["header_name"]] = row["header_value"] or ""
+    return dict(result)
 
 
 def log_summary(
@@ -872,9 +893,15 @@ def _ts_to_date(ts: int) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
+def _he(s: str) -> str:
+    """Minimal HTML-escape for untrusted strings."""
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
 def generate_html_summary(
     reports: list[dict],
     records_by_report: dict[int, list[dict]],
+    headers_by_report: dict[int, dict[str, str]],
     db_path: Path,
     total_in_db: int,
 ) -> str:
@@ -898,6 +925,7 @@ def generate_html_summary(
 
         rows.append(
             {
+                "id": rid,
                 "org": report["org_name"] or "Unknown",
                 "period": period,
                 "total": total_vol,
@@ -924,11 +952,25 @@ def generate_html_summary(
     def cell_style(val: int, warn_color: str) -> str:
         return f' style="color:{warn_color};font-weight:bold;"' if val > 0 else ""
 
+    def result_style(result: str) -> str:
+        if result == "pass":
+            return ' style="color:green;"'
+        if result in ("fail", ""):
+            return ' style="color:crimson;font-weight:bold;"'
+        return ""
+
+    def disp_style(disp: str) -> str:
+        if disp == "reject":
+            return ' style="color:crimson;font-weight:bold;"'
+        if disp == "quarantine":
+            return ' style="color:darkorange;font-weight:bold;"'
+        return ""
+
     table_body = ""
     for r in rows:
         table_body += f"""
         <tr{row_style(r)}>
-          <td>{r['org']}</td>
+          <td>{_he(r['org'])}</td>
           <td>{r['period']}</td>
           <td>{r['total']}</td>
           <td>{r['dkim_pass']} / {r['dkim_fail']}</td>
@@ -944,6 +986,66 @@ def generate_html_summary(
             "No records in this period</td></tr>"
         )
 
+    # ── Failures detail section ───────────────────────────────────────────────
+    # Show every record where DKIM or SPF did not pass, grouped by report.
+    failure_rows = ""
+    for report in reports:
+        rid = report["id"]
+        recs = records_by_report.get(rid, [])
+        failures = [r for r in recs if r["dkim_result"] != "pass" or r["spf_result"] != "pass"]
+        if not failures:
+            continue
+
+        hdrs = headers_by_report.get(rid, {})
+        report_from    = _he(hdrs.get("From", report.get("sender", "") or ""))
+        report_subject = _he(hdrs.get("Subject", report.get("subject", "") or ""))
+        report_date    = _he(hdrs.get("Date", report.get("date_received", "") or ""))
+        report_to      = _he(hdrs.get("To", ""))
+
+        # Report email header summary
+        failure_rows += f"""
+        <tr style="background:#f8f0ff;">
+          <td colspan="7" style="font-weight:bold;font-size:13px;">
+            {_he(report['org_name'] or 'Unknown')}
+            <span style="font-weight:normal;color:#666;margin-left:12px;">
+              From: {report_from} &nbsp; Date: {report_date}
+            </span>"""
+        if report_to:
+            failure_rows += f'<span style="font-weight:normal;color:#666;margin-left:8px;">To: {report_to}</span>'
+        if report_subject:
+            failure_rows += f'<br><span style="font-weight:normal;font-size:12px;color:#888;">Subject: {report_subject}</span>'
+        failure_rows += "</td></tr>"
+
+        for rec in failures:
+            failure_rows += f"""
+        <tr>
+          <td style="padding-left:24px;">{_he(rec['source_ip'] or '—')}</td>
+          <td>{rec['count']}</td>
+          <td{disp_style(rec['disposition'])}>{_he(rec['disposition'] or '—')}</td>
+          <td{result_style(rec['dkim_result'])}>{_he(rec['dkim_result'] or '—')}</td>
+          <td{result_style(rec['spf_result'])}>{_he(rec['spf_result'] or '—')}</td>
+          <td>{_he(rec['header_from'] or '—')}</td>
+          <td>{_he(rec['envelope_from'] or '—')}</td>
+        </tr>"""
+
+    if failure_rows:
+        failures_section = f"""
+<h2 style="font-size:17px;margin-top:28px;">Authentication Failures</h2>
+<p style="color:#555;">Records where DKIM or SPF did not pass, with the headers of the report email that contained them.</p>
+<table>
+  <thead>
+    <tr>
+      <th>Source IP</th><th>Count</th><th>Disposition</th>
+      <th>DKIM</th><th>SPF</th><th>Header From</th><th>Envelope From</th>
+    </tr>
+  </thead>
+  <tbody>
+    {failure_rows}
+  </tbody>
+</table>"""
+    else:
+        failures_section = '<p style="color:green;margin-top:20px;">&#10003; No authentication failures in this period.</p>'
+
     total_records = sum(
         r["count"] for recs in records_by_report.values() for r in recs
     )
@@ -957,6 +1059,7 @@ def generate_html_summary(
 <style>
   body  {{ font-family: Arial, sans-serif; font-size: 14px; color: #222; margin: 20px; }}
   h1   {{ font-size: 22px; margin-bottom: 4px; }}
+  h2   {{ font-size: 17px; margin-bottom: 4px; }}
   p    {{ margin: 4px 0 12px; color: #555; }}
   table {{ border-collapse: collapse; width: 100%; margin-top: 8px; }}
   th, td {{ border: 1px solid #ccc; padding: 7px 10px; text-align: left; }}
@@ -989,6 +1092,8 @@ def generate_html_summary(
     {table_body}
   </tbody>
 </table>
+
+{failures_section}
 
 <div class="footer">
   <p class="legend">
@@ -1038,10 +1143,13 @@ def summarize(
     conn: sqlite3.Connection,
     since: Optional[str] = None,
     dry_run: bool = False,
+    preview: bool = False,
 ) -> bool:
     """
-    Generate an HTML summary of unsummarized reports and either send it via
-    SMTP or, with --dry-run, print it to stdout.
+    Generate an HTML summary of unsummarized reports and either:
+      - send it via SMTP (default)
+      - print it to stdout (--dry-run)
+      - write to a temp file and open in a browser (--preview)
     Returns True if a summary was generated.
     """
     reports = get_unsummarized_reports(conn, since)
@@ -1052,6 +1160,7 @@ def summarize(
 
     report_ids = [r["id"] for r in reports]
     all_records = get_records_for_reports(conn, report_ids)
+    all_headers = get_headers_for_reports(conn, report_ids)
 
     records_by_report: dict[int, list[dict]] = defaultdict(list)
     for rec in all_records:
@@ -1065,12 +1174,24 @@ def summarize(
     html = generate_html_summary(
         [dict(r) for r in reports],
         records_by_report,
+        all_headers,
         config.db_path,
         total_in_db,
     )
 
     if dry_run:
         print(html)
+        return True
+
+    if preview:
+        fd, tmp_path = tempfile.mkstemp(suffix=".html", prefix="dmarc_summary_")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(html)
+            logger.info("Preview written to %s", tmp_path)
+            subprocess.Popen(["xdg-open", tmp_path])
+        except Exception as exc:
+            logger.error("Failed to open preview: %s", exc)
         return True
 
     # Validate SMTP config minimally
@@ -1121,7 +1242,8 @@ modes:
 examples:
   dmarc_report.py                              # collect + summarize
   dmarc_report.py --mode collect               # fetch only
-  dmarc_report.py --mode summarize --dry-run   # preview HTML
+  dmarc_report.py --mode summarize --dry-run   # dump HTML to stdout
+  dmarc_report.py --mode summarize --preview   # open in browser
   dmarc_report.py --mode summarize --since 2024-01-01
   dmarc_report.py --config /etc/dmarc.toml -v
 """,
@@ -1150,6 +1272,11 @@ examples:
         "--dry-run",
         action="store_true",
         help="Print summary HTML to stdout instead of sending email",
+    )
+    p.add_argument(
+        "--preview",
+        action="store_true",
+        help="Write summary HTML to a temp file and open it with xdg-open",
     )
     p.add_argument(
         "--verbose", "-v",
@@ -1197,7 +1324,7 @@ def main() -> None:
             since = args.since
             if since and re.match(r"^\d{4}-\d{2}-\d{2}$", since):
                 since = since + "T00:00:00+00:00"
-            ok = summarize(config, conn, since=since, dry_run=args.dry_run)
+            ok = summarize(config, conn, since=since, dry_run=args.dry_run, preview=args.preview)
             if not ok and not args.dry_run:
                 logger.info("No summary generated (nothing new to report).")
     finally:
