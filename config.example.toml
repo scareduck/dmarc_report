@@ -1,0 +1,71 @@
+# dmarc_report configuration
+# Copy this file to config.toml and adjust as needed.
+# All paths may be absolute or relative to the working directory.
+
+# ─── Database ────────────────────────────────────────────────────────────────
+
+[database]
+# Where to store (or create) the SQLite database.
+path = "/var/lib/dmarc_report/reports.db"
+
+# ─── External passwords file (optional) ──────────────────────────────────────
+# Point to a JSON file that holds credentials keyed by email address.
+# Expected entry format:
+#
+#   "user@example.com": {
+#       "password":  "app-password",
+#       "imap_host": "imap.example.com:993",
+#       "smtp_host": "smtp.example.com:465"
+#   }
+#
+# Any [[account]] or [smtp] section that sets password_key = "user@example.com"
+# will automatically inherit host, port, username, and password from that entry.
+# Values set directly in the TOML always take precedence.
+
+[passwords]
+file = "~/.passwords.json"
+
+# ─── IMAP Accounts ───────────────────────────────────────────────────────────
+# Define one [[account]] section per mailbox.  At least one is required.
+
+# Option A — credentials from passwords file:
+[[account]]
+name         = "primary"
+password_key = "user@example.com"   # looks up imap_host + password in passwords file
+folders = ["INBOX"]               # add once you know which folder(s) to scan
+tls     = true
+timeout = 30
+
+# Option B — inline credentials (no passwords file needed):
+# [[account]]
+# name     = "secondary"
+# host     = "mail.other-domain.com"
+# port     = 993
+# username = "postmaster@other-domain.com"
+# password = "your-app-password-here"
+# folders  = ["INBOX"]
+# tls      = true
+# starttls = false
+# timeout  = 30
+
+# ─── SMTP (for summary delivery) ─────────────────────────────────────────────
+# Connection security is inferred from port (465 → ssl, else starttls) unless
+# you set mode explicitly.  Options: "starttls", "ssl", "plain".
+
+# Option A — credentials from passwords file:
+[smtp]
+password_key = "user@example.com"   # looks up smtp_host + password in passwords file
+from_addr    = "dmarc-reports@example.com"
+to_addrs     = ["admin@example.com"]
+timeout      = 30
+
+# Option B — inline credentials:
+# [smtp]
+# host      = "smtp.example.com"
+# port      = 587
+# mode      = "starttls"
+# from_addr = "dmarc-reports@example.com"
+# to_addrs  = ["admin@example.com"]
+# username  = "dmarc-reports@example.com"
+# password  = "your-smtp-password"
+# timeout   = 30
