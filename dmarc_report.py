@@ -1241,6 +1241,7 @@ examples:
   dmarc_report --summarize --dry-run        # dump HTML to stdout
   dmarc_report --summarize --preview        # open in browser
   dmarc_report --summarize --since 2024-01-01
+  dmarc_report --summarize --since all         # everything from the beginning
   dmarc_report --config /etc/dmarc_report/config.toml -v
 """,
     )
@@ -1266,8 +1267,8 @@ examples:
         "--since",
         metavar="ISO_DATE",
         help=(
-            "Override summary window start (ISO 8601, e.g. 2024-01-01). "
-            "Causes re-summarization of reports after this date."
+            "Override summary window start: ISO date (e.g. 2024-01-01) "
+            "or 'all' to include everything from the beginning of time."
         ),
     )
     p.add_argument(
@@ -1327,7 +1328,9 @@ def main() -> None:
 
         if do_summarize:
             since = args.since
-            if since and re.match(r"^\d{4}-\d{2}-\d{2}$", since):
+            if since == "all":
+                since = "1970-01-01T00:00:00+00:00"
+            elif since and re.match(r"^\d{4}-\d{2}-\d{2}$", since):
                 since = since + "T00:00:00+00:00"
             ok = summarize(config, conn, since=since, dry_run=args.dry_run, preview=args.preview)
             if not ok and not args.dry_run:
