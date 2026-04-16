@@ -1250,9 +1250,9 @@ examples:
     )
     p.add_argument(
         "--config",
-        default="config.toml",
+        default=os.path.expanduser("~/.config/dmarc_report/config.toml"),
         metavar="FILE",
-        help="Path to TOML config file (default: config.toml)",
+        help="Path to TOML config file (default: ~/.config/dmarc_report/config.toml)",
     )
     p.add_argument(
         "--mode",
