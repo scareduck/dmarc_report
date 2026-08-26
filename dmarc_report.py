@@ -443,9 +443,10 @@ def classify_dmarc_message(msg: email.message.Message) -> bool:
         ct = part.get_content_type().lower()
         fn = (part.get_filename() or "").lower()
 
-        # Signal 3: attachment name matches dmarc/report patterns
+        # Signal 3: attachment name matches dmarc/report patterns, or the RFC 7489
+        # "domain!domain!begin!end" filename convention used by Google and others.
         if not attachment_signal and fn:
-            if re.search(r"(dmarc|report)", fn) and fn.endswith(
+            if (re.search(r"(dmarc|report)", fn) or re.search(r"[^!]+![^!]+!\d+!\d+", fn)) and fn.endswith(
                 (".xml", ".gz", ".zip")
             ):
                 signals += 1
@@ -484,14 +485,15 @@ def extract_xml_from_part(part: email.message.Message) -> Optional[str]:
     ct = part.get_content_type().lower()
 
     # ZIP archive (may contain the XML)
-    if fn.endswith(".zip") or ct == "application/zip":
+    _zip_mime = {"application/zip", "application/x-zip-compressed"}
+    if fn.endswith(".zip") or ct in _zip_mime:
         try:
             with zipfile.ZipFile(io.BytesIO(payload)) as zf:
                 for name in zf.namelist():
                     if name.lower().endswith(".xml"):
                         return zf.read(name).decode("utf-8", errors="replace")
         except (zipfile.BadZipFile, Exception) as exc:
-            logger.debug("ZIP extraction failed (%s): %s", fn, exc)
+            logger.warning("ZIP extraction failed (%s): %s", fn, exc)
 
     # GZIP file
     if fn.endswith(".gz") or ct == "application/gzip":
@@ -652,6 +654,7 @@ def auto_discover_dmarc_folders(
         'SUBJECT "Report Domain"',
         'FROM "dmarc"',
         'FROM "report"',
+        *[f'FROM "{s}"' for s in KNOWN_SENDERS],
     ]
 
     for folder in all_folders:
@@ -700,17 +703,17 @@ def fetch_new_messages(
         'SUBJECT "Report Domain"',
         'SUBJECT "Submitter"',
         'FROM "dmarc"',
-        *[f'FROM "{s.split("@")[1]}"' for s in KNOWN_SENDERS],
+        *[f'FROM "{s}"' for s in KNOWN_SENDERS],
     ):
         try:
             status, data = imap.search(None, query)
             if status == "OK" and data[0]:
                 candidate_nums.update(data[0].split())
-        except imaplib.IMAP4.error:
-            pass  # not all servers support all SEARCH terms
+        except imaplib.IMAP4.error as exc:
+            logger.debug("IMAP SEARCH '%s' failed: %s", query, exc)
 
     if not candidate_nums:
-        logger.debug("No candidate messages in '%s'", folder)
+        logger.info("No candidate messages in '%s'", folder)
         return []
 
     logger.info(
